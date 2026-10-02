@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -28,6 +29,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	"github.com/spf13/cobra"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/rest"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
@@ -266,29 +268,22 @@ func runManager(
 		})
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                     scheme,
-		Metrics:                    metricsServerOptions,
-		WebhookServer:              webhookServer,
-		HealthProbeBindAddress:     probeAddr,
-		LeaderElection:             enableLeaderElection,
-		LeaderElectionID:           leaderElectionID,
-		LeaderElectionNamespace:    leaderElectionNamespace,
-		LeaderElectionResourceLock: leaderElectionResourceLock,
-		LeaseDuration:              &leaseDuration,
-		RenewDeadline:              &renewDeadline,
-		RetryPeriod:                &retryPeriod,
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
+	restCfg := ctrl.GetConfigOrDie()
+
+	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
+		Scheme:                        scheme,
+		Metrics:                       metricsServerOptions,
+		WebhookServer:                 webhookServer,
+		HealthProbeBindAddress:        probeAddr,
+		LeaderElection:                enableLeaderElection,
+		LeaderElectionID:              leaderElectionID,
+		LeaderElectionNamespace:       leaderElectionNamespace,
+		LeaderElectionResourceLock:    leaderElectionResourceLock,
+		LeaseDuration:                 &leaseDuration,
+		RenewDeadline:                 &renewDeadline,
+		RetryPeriod:                   &retryPeriod,
+		LeaderElectionConfig:          leaderElectionRestConfig(restCfg),
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -375,4 +370,21 @@ func runManager(
 		return fmt.Errorf("problem running manager: %w", err)
 	}
 	return nil
+}
+
+const (
+	leaderElectionQPS   = 5
+	leaderElectionBurst = 10
+)
+
+func leaderElectionRestConfig(base *rest.Config) *rest.Config {
+	cfg := rest.CopyConfig(base)
+	cfg.RateLimiter = nil
+	cfg.QPS = leaderElectionQPS
+	cfg.Burst = leaderElectionBurst
+	cfg.Dial = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	return cfg
 }
