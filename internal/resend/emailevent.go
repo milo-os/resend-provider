@@ -1,8 +1,10 @@
 package resend
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -103,6 +105,59 @@ type Tag struct {
 	Value string `json:"value"`
 }
 
+// Tags is the list of tags attached to an email event.
+type Tags []Tag
+
+// UnmarshalJSON accepts both shapes Resend uses for tags: an object of
+// name/value pairs (current webhook payloads) and an array of {name, value}
+// objects (older payloads and the send API). Tags in any other shape are
+// ignored rather than failing the whole event, which can still be matched to
+// its Email by provider ID.
+func (t *Tags) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		*t = nil
+		return nil
+	}
+
+	if data[0] == '[' {
+		var list []Tag
+		if err := json.Unmarshal(data, &list); err != nil {
+			*t = nil
+			return nil
+		}
+		*t = list
+		return nil
+	}
+
+	var obj map[string]string
+	if err := json.Unmarshal(data, &obj); err != nil {
+		*t = nil
+		return nil
+	}
+	names := make([]string, 0, len(obj))
+	for name := range obj {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	list := make([]Tag, 0, len(names))
+	for _, name := range names {
+		list = append(list, Tag{Name: name, Value: obj[name]})
+	}
+	*t = list
+	return nil
+}
+
+// Get returns the value of the tag with the given name.
+func (t Tags) Get(name string) (string, bool) {
+	for _, tag := range t {
+		if tag.Name == name {
+			return tag.Value, true
+		}
+	}
+	return "", false
+}
+
 // EmailBase contains the common fields for all email events.
 type EmailBase struct {
 	BroadcastID string     `json:"broadcast_id"`
@@ -111,7 +166,7 @@ type EmailBase struct {
 	From        string     `json:"from"`
 	To          []string   `json:"to"`
 	Subject     string     `json:"subject"`
-	Tags        []Tag      `json:"tags"`
+	Tags        Tags       `json:"tags"`
 }
 
 // Click details for email.clicked event.

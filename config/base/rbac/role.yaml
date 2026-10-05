@@ -49,6 +49,7 @@ rules:
   resources:
   - contactgroupmemberships/status
   - contacts/status
+  - emails/status
   verbs:
   - get
   - patch
@@ -58,6 +59,7 @@ rules:
   resources:
   - contactgroups
   - contacts
+  - emails
   verbs:
   - get
   - list
@@ -66,14 +68,12 @@ rules:
   - notification.miloapis.com
   resources:
   - contactgroups/status
-  - emails/status
   verbs:
   - get
   - update
 - apiGroups:
   - notification.miloapis.com
   resources:
-  - emails
   - emailtemplates
   verbs:
   - get

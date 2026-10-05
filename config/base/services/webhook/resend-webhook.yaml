@@ -35,6 +35,7 @@ spec:
             - --cert-file=$(CERT_FILE)
             - --key-file=$(KEY_FILE)
             - --metrics-bind-address=$(METRICS_BIND_ADDRESS)
+            - --email-from-address=$(EMAIL_FROM_ADDRESS)
           env:
             - name: WEBHOOK_PORT
               value: "8090"
@@ -46,6 +47,11 @@ spec:
               value: tls.key
             - name: METRICS_BIND_ADDRESS
               value: ":8443"
+            # Set to the manager's EMAIL_FROM_ADDRESS to skip searching for
+            # untagged delivery events from other senders. Empty searches for
+            # every untagged event.
+            - name: EMAIL_FROM_ADDRESS
+              value: ""
           envFrom:
             - secretRef:
                 name: resend-keys # MUST contain the key RESEND_WEBHOOK_SIGNING_KEY

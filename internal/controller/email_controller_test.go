@@ -35,6 +35,7 @@ import (
 	"go.miloapis.com/email-provider-resend/internal/config"
 	"go.miloapis.com/email-provider-resend/internal/emailprovider"
 	"go.miloapis.com/email-provider-resend/internal/emailprovider/mockprovider"
+	"go.miloapis.com/email-provider-resend/internal/resend"
 )
 
 var _ = ginko.Describe("EmailController.Reconcile", func() {
@@ -125,6 +126,7 @@ var _ = ginko.Describe("EmailController.Reconcile", func() {
 
 		controller = &EmailController{
 			Client:        k8sClient,
+			APIReader:     k8sClient,
 			EmailProvider: *service,
 			Config:        *conf,
 		}
@@ -144,6 +146,10 @@ var _ = ginko.Describe("EmailController.Reconcile", func() {
 			gomega.Expect(fetched.Status.HTMLBody).To(gomega.Equal(""))
 			gomega.Expect(fetched.Status.TextBody).To(gomega.Equal(""))
 			gomega.Expect(fetched.Status.EmailAddress).To(gomega.Equal("recipient@example.com"))
+
+			// The email is tagged so the webhook can find it without a search.
+			gomega.Expect(fakeProv.LastSendEmailInput.Tags).To(gomega.Equal(
+				resend.EmailRefTags(emailObj.Namespace, emailObj.Name)))
 		})
 	})
 
@@ -159,6 +165,27 @@ var _ = ginko.Describe("EmailController.Reconcile", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(res).To(gomega.Equal(ctrl.Result{}))
 			gomega.Expect(fakeProv.SendEmailCallCount).To(gomega.Equal(0)) // No call to the provider
+		})
+	})
+
+	ginko.Context("when a send fails after an earlier status write recorded bodies", func() {
+		ginko.It("keeps the rendered bodies", func() {
+			existing := &notificationmiloapiscomv1alpha1.Email{}
+			gomega.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: emailObj.Name, Namespace: emailObj.Namespace}, existing)).To(gomega.Succeed())
+			existing.Status.HTMLBody = "<p>kept</p>"
+			existing.Status.TextBody = "kept"
+			gomega.Expect(k8sClient.Status().Update(ctx, existing)).To(gomega.Succeed())
+			fakeProv.SendEmailErr = fmt.Errorf("provider failure")
+
+			_, err := controller.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: emailObj.Name, Namespace: emailObj.Namespace}})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			fetched := &notificationmiloapiscomv1alpha1.Email{}
+			gomega.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: emailObj.Name, Namespace: emailObj.Namespace}, fetched)).To(gomega.Succeed())
+			gomega.Expect(fetched.Status.HTMLBody).To(gomega.Equal("<p>kept</p>"))
+			gomega.Expect(fetched.Status.TextBody).To(gomega.Equal("kept"))
+			gomega.Expect(fetched.Status.Conditions).To(gomega.ContainElement(gomega.HaveField(
+				"Reason", notificationmiloapiscomv1alpha1.EmailDeliveryFailedReason)))
 		})
 	})
 
@@ -202,7 +229,7 @@ var _ = ginko.Describe("EmailController.Reconcile", func() {
 			service := emailprovider.NewService(fakeProv, "from@example.com", "reply@example.com")
 			conf, err := config.NewEmailControllerConfig(time.Second, time.Second, time.Second)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			controller = &EmailController{Client: k8sClient, EmailProvider: *service, Config: *conf}
+			controller = &EmailController{Client: k8sClient, APIReader: k8sClient, EmailProvider: *service, Config: *conf}
 		})
 
 		ginko.It("sends the email and updates the status", func() {

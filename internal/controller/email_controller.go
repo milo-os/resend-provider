@@ -25,8 +25,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.miloapis.com/email-provider-resend/internal/config"
@@ -35,13 +38,18 @@ import (
 
 // EmailReconciler reconciles a Email object
 type EmailController struct {
-	Client        client.Client
+	Client client.Client
+	// APIReader reads Emails directly from the API server. Emails carry their
+	// rendered bodies, so the controller watches only their metadata and must
+	// not read them through the cache-backed Client, which would start a
+	// full-object informer.
+	APIReader     client.Reader
 	EmailProvider emailprovider.Service
 	Config        config.EmailControllerConfig
 }
 
-// +kubebuilder:rbac:groups=notification.miloapis.com,resources=emails,verbs=get
-// +kubebuilder:rbac:groups=notification.miloapis.com,resources=emails/status,verbs=get;update
+// +kubebuilder:rbac:groups=notification.miloapis.com,resources=emails,verbs=get;list;watch
+// +kubebuilder:rbac:groups=notification.miloapis.com,resources=emails/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=notification.miloapis.com,resources=emailtemplates,verbs=get
 // +kubebuilder:rbac:groups=iam.miloapis.com,resources=users,verbs=get
 
@@ -53,7 +61,7 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	// Get Email with retry logic to handle potential eventual consistency issues
 	email := &notificationmiloapiscomv1alpha1.Email{}
-	err := r.Client.Get(ctx, req.NamespacedName, email)
+	err := r.APIReader.Get(ctx, req.NamespacedName, email)
 	if errors.IsNotFound(err) {
 		log.Info("Email not found. Probably deleted.", "namespacedName", req.String(), "name", req.Name, "namespace", req.Namespace)
 		return ctrl.Result{}, nil
@@ -61,6 +69,7 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		log.Error(err, "Failed to get Email", "namespacedName", req.String(), "name", req.Name, "namespace", req.Namespace)
 		return ctrl.Result{}, fmt.Errorf("failed to get Email: %w", err)
 	}
+	base := email.DeepCopy()
 
 	log.Info("Reconciling Email", "email", email.Name, "template", email.Spec.TemplateRef.Name, "recipient", email.Spec.Recipient)
 
@@ -87,7 +96,7 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		output, err := r.EmailProvider.Send(ctx, email.DeepCopy(), emailTemplate.DeepCopy(), recipientEmailAddress)
 		if err != nil {
 			log.Error(err, "Failed to send email", "email", email.Name)
-			if err := r.updateEmailStatus(ctx, email, metav1.Condition{
+			if err := r.updateEmailStatus(ctx, base, email, metav1.Condition{
 				Type:               notificationmiloapiscomv1alpha1.EmailDeliveredCondition,
 				Status:             metav1.ConditionFalse,
 				Reason:             notificationmiloapiscomv1alpha1.EmailDeliveryFailedReason,
@@ -113,7 +122,7 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		// EmailProvider.Send (resend implementation) uses an idempotency mechanism using the Email.Name as idempotency key.
 		// In case of a failure updating the status, the email won't be sent again, and the return value from EmailProvider.Send
 		// will be the same one as the original one. The idempotency only lasts for 24 hours.
-		if err := r.updateEmailStatus(ctx, email, metav1.Condition{
+		if err := r.updateEmailStatus(ctx, base, email, metav1.Condition{
 			Type:               notificationmiloapiscomv1alpha1.EmailDeliveredCondition,
 			Status:             metav1.ConditionUnknown,
 			Reason:             notificationmiloapiscomv1alpha1.EmailDeliveryPendingReason,
@@ -146,13 +155,20 @@ func isEmailAlreadySent(email *notificationmiloapiscomv1alpha1.Email) bool {
 	return false
 }
 
-// updateEmailStatus updates the status of the email with the given condition.
-func (r *EmailController) updateEmailStatus(ctx context.Context, email *notificationmiloapiscomv1alpha1.Email, condition metav1.Condition) error {
+// updateEmailStatus sets the given condition on the email and patches the
+// status fields that changed since base. The patch fails on a conflict, as an
+// update would.
+func (r *EmailController) updateEmailStatus(
+	ctx context.Context,
+	base, email *notificationmiloapiscomv1alpha1.Email,
+	condition metav1.Condition,
+) error {
 	log := logf.FromContext(ctx).WithName("email-reconciler")
 
 	meta.SetStatusCondition(&email.Status.Conditions, condition)
 
-	if err := r.Client.Status().Update(ctx, email); err != nil {
+	patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
+	if err := r.Client.Status().Patch(ctx, email, patch); err != nil {
 		log.Error(err, "failed to update Email status", "email", email.Name)
 		return fmt.Errorf("failed to update Email status: %w", err)
 	}
@@ -162,23 +178,16 @@ func (r *EmailController) updateEmailStatus(ctx context.Context, email *notifica
 }
 
 // SetupWithManager sets up the controller with the Manager.
+//
+// Emails are watched as metadata only, so the cache does not hold their
+// rendered bodies and a resync lists only metadata. Reconcile reads each Email
+// from the API server instead. A restart therefore enqueues every stored
+// Email; the priority queue processes those initial-list items after Emails
+// created or changed since, so new mail is not stuck behind the backlog.
 func (r *EmailController) SetupWithManager(mgr ctrl.Manager) error {
-	// Index Email objects by .status.providerID
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(),
-		&notificationmiloapiscomv1alpha1.Email{}, "status.providerID",
-		func(obj client.Object) []string {
-			e := obj.(*notificationmiloapiscomv1alpha1.Email)
-			if e.Status.ProviderID == "" {
-				return nil
-			}
-			return []string{e.Status.ProviderID}
-		},
-	); err != nil {
-		return fmt.Errorf("failed to index Email objects by .status.providerID: %w", err)
-	}
-
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&notificationmiloapiscomv1alpha1.Email{}).
+		For(&notificationmiloapiscomv1alpha1.Email{}, builder.OnlyMetadata).
+		WithOptions(controller.Options{UsePriorityQueue: ptr.To(true)}).
 		Named("email").
 		Complete(r)
 }
