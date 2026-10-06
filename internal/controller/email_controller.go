@@ -71,6 +71,14 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	}
 	base := email.DeepCopy()
 
+	// Skip sent Emails before looking up their template and recipient: on
+	// startup every stored Email is reconciled, and a sent Email must not fail
+	// because its template or User has since been deleted.
+	if isEmailAlreadySent(email) {
+		log.Info("Email was already sent. Probably reconciling because of webhook update.")
+		return ctrl.Result{}, nil
+	}
+
 	log.Info("Reconciling Email", "email", email.Name, "template", email.Spec.TemplateRef.Name, "recipient", email.Spec.Recipient)
 
 	// Get EmailTemplate
@@ -89,51 +97,46 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, fmt.Errorf("failed to get recipient email address: %w", err)
 	}
 
-	if !isEmailAlreadySent(email) {
-		log.Info("Sending email")
+	log.Info("Sending email")
 
-		// Send email
-		output, err := r.EmailProvider.Send(ctx, email.DeepCopy(), emailTemplate.DeepCopy(), recipientEmailAddress)
-		if err != nil {
-			log.Error(err, "Failed to send email", "email", email.Name)
-			if err := r.updateEmailStatus(ctx, base, email, metav1.Condition{
-				Type:               notificationmiloapiscomv1alpha1.EmailDeliveredCondition,
-				Status:             metav1.ConditionFalse,
-				Reason:             notificationmiloapiscomv1alpha1.EmailDeliveryFailedReason,
-				Message:            fmt.Sprintf("Email delivery failed: %s", err.Error()),
-				LastTransitionTime: metav1.Now(),
-			}); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to update Email status: %w", err)
-			}
-			return ctrl.Result{RequeueAfter: r.Config.GetWaitTimeBeforeRetry(email.Spec.Priority)}, nil
-		}
-		log.Info("Email sent", "email", email.Name, "deliveryID", output.DeliveryID)
-
-		// Record provider ID and mark delivery as pending (Status=Unknown).
-		// We set this ONLY on the first successful send so that future webhook
-		// updates (Delivered / Failed) are not overwritten by subsequent
-		// reconciliations.
-		email.Status.ProviderID = output.DeliveryID
-		email.Status.HTMLBody = output.HTMLBody
-		email.Status.TextBody = output.TextBody
-		email.Status.Subject = output.Subject
-		email.Status.EmailAddress = output.RecipientEmailAddress
-
-		// EmailProvider.Send (resend implementation) uses an idempotency mechanism using the Email.Name as idempotency key.
-		// In case of a failure updating the status, the email won't be sent again, and the return value from EmailProvider.Send
-		// will be the same one as the original one. The idempotency only lasts for 24 hours.
+	// Send email
+	output, err := r.EmailProvider.Send(ctx, email.DeepCopy(), emailTemplate.DeepCopy(), recipientEmailAddress)
+	if err != nil {
+		log.Error(err, "Failed to send email", "email", email.Name)
 		if err := r.updateEmailStatus(ctx, base, email, metav1.Condition{
 			Type:               notificationmiloapiscomv1alpha1.EmailDeliveredCondition,
-			Status:             metav1.ConditionUnknown,
-			Reason:             notificationmiloapiscomv1alpha1.EmailDeliveryPendingReason,
-			Message:            fmt.Sprintf("Email accepted for delivery. Provider ID: %s", output.DeliveryID),
+			Status:             metav1.ConditionFalse,
+			Reason:             notificationmiloapiscomv1alpha1.EmailDeliveryFailedReason,
+			Message:            fmt.Sprintf("Email delivery failed: %s", err.Error()),
 			LastTransitionTime: metav1.Now(),
 		}); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to update Email status: %w", err)
 		}
+		return ctrl.Result{RequeueAfter: r.Config.GetWaitTimeBeforeRetry(email.Spec.Priority)}, nil
+	}
+	log.Info("Email sent", "email", email.Name, "deliveryID", output.DeliveryID)
 
-	} else {
-		log.Info("Email was already sent. Probably reconciling because of webhook update.")
+	// Record provider ID and mark delivery as pending (Status=Unknown).
+	// We set this ONLY on the first successful send so that future webhook
+	// updates (Delivered / Failed) are not overwritten by subsequent
+	// reconciliations.
+	email.Status.ProviderID = output.DeliveryID
+	email.Status.HTMLBody = output.HTMLBody
+	email.Status.TextBody = output.TextBody
+	email.Status.Subject = output.Subject
+	email.Status.EmailAddress = output.RecipientEmailAddress
+
+	// EmailProvider.Send (resend implementation) uses an idempotency mechanism using the Email.Name as idempotency key.
+	// In case of a failure updating the status, the email won't be sent again, and the return value from EmailProvider.Send
+	// will be the same one as the original one. The idempotency only lasts for 24 hours.
+	if err := r.updateEmailStatus(ctx, base, email, metav1.Condition{
+		Type:               notificationmiloapiscomv1alpha1.EmailDeliveredCondition,
+		Status:             metav1.ConditionUnknown,
+		Reason:             notificationmiloapiscomv1alpha1.EmailDeliveryPendingReason,
+		Message:            fmt.Sprintf("Email accepted for delivery. Provider ID: %s", output.DeliveryID),
+		LastTransitionTime: metav1.Now(),
+	}); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to update Email status: %w", err)
 	}
 
 	log.Info("Email reconciled")

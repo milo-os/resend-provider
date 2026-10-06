@@ -166,6 +166,23 @@ var _ = ginko.Describe("EmailController.Reconcile", func() {
 			gomega.Expect(res).To(gomega.Equal(ctrl.Result{}))
 			gomega.Expect(fakeProv.SendEmailCallCount).To(gomega.Equal(0)) // No call to the provider
 		})
+
+		ginko.It("succeeds after its template and recipient are deleted", func() {
+			existing := &notificationmiloapiscomv1alpha1.Email{}
+			gomega.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: emailObj.Name, Namespace: emailObj.Namespace}, existing)).To(gomega.Succeed())
+			existing.Status.ProviderID = "already-delivered"
+			gomega.Expect(k8sClient.Status().Update(ctx, existing)).To(gomega.Succeed())
+
+			gomega.Expect(k8sClient.Delete(ctx, &notificationmiloapiscomv1alpha1.EmailTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "welcome-template"}})).To(gomega.Succeed())
+			gomega.Expect(k8sClient.Delete(ctx, &iammiloapiscomv1alpha1.User{
+				ObjectMeta: metav1.ObjectMeta{Name: "user-1"}})).To(gomega.Succeed())
+
+			res, err := controller.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: emailObj.Name, Namespace: emailObj.Namespace}})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(res).To(gomega.Equal(ctrl.Result{}))
+			gomega.Expect(fakeProv.SendEmailCallCount).To(gomega.Equal(0))
+		})
 	})
 
 	ginko.Context("when a send fails after an earlier status write recorded bodies", func() {
