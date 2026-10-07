@@ -296,6 +296,7 @@ func runManager(
 	// Setup email controller
 	if err := (&controller.EmailController{
 		Client:        mgr.GetClient(),
+		APIReader:     mgr.GetAPIReader(),
 		EmailProvider: *emailProviderService,
 		Config:        *emailCtrlConfig,
 	}).SetupWithManager(mgr); err != nil {

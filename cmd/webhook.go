@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"net/mail"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -28,6 +29,7 @@ func createWebhookCommand() *cobra.Command {
 	var certDir, certFile, keyFile string
 	var metricsBindAddress string
 	var webhookSigningKey, contactWebhookSigningKey string
+	var emailFrom string
 
 	cmd := &cobra.Command{
 		Use:   "resend-webhook",
@@ -38,7 +40,8 @@ func createWebhookCommand() *cobra.Command {
 				webhookPort,
 				certDir, certFile, keyFile,
 				metricsBindAddress,
-				webhookSigningKey, contactWebhookSigningKey)
+				webhookSigningKey, contactWebhookSigningKey,
+				emailFrom)
 		},
 	}
 
@@ -48,6 +51,11 @@ func createWebhookCommand() *cobra.Command {
 		"Directory that contains the TLS certs to use for serving the webhook")
 	cmd.Flags().StringVar(&certFile, "cert-file", "", "Filename in the directory that contains the TLS cert")
 	cmd.Flags().StringVar(&keyFile, "key-file", "", "Filename in the directory that contains the TLS private key")
+
+	// Email flags.
+	cmd.Flags().StringVar(&emailFrom, "email-from-address", "",
+		"The address the manager sends email from. Untagged delivery events from other senders are "+
+			"acknowledged without searching for their Email. If empty, every untagged event is searched.")
 
 	// Metrics flags.
 	cmd.Flags().StringVar(&metricsBindAddress, "metrics-bind-address", ":8080", "address the metrics endpoint binds to")
@@ -63,7 +71,8 @@ func runWebhook(
 	webhookPort int,
 	certDir, certFile, keyFile string,
 	metricsBindAddress string,
-	webhookSigningKey, contactWebhookSigningKey string) error {
+	webhookSigningKey, contactWebhookSigningKey string,
+	emailFrom string) error {
 	logf.SetLogger(zap.New(zap.JSONEncoder()))
 	log := logf.Log.WithName("resend-webhook")
 
@@ -73,6 +82,17 @@ func runWebhook(
 		metricsBindAddress,
 		webhookSigningKey); err != nil {
 		return err
+	}
+
+	senderAddress := ""
+	if emailFrom == "" {
+		log.Info("WARNING: --email-from-address is not set; every untagged delivery event will search all Emails")
+	} else {
+		addr, err := mail.ParseAddress(emailFrom)
+		if err != nil {
+			return fmt.Errorf("invalid --email-from-address %q: %w", emailFrom, err)
+		}
+		senderAddress = addr.Address
 	}
 
 	// Setup Kubernetes client config
@@ -121,7 +141,7 @@ func runWebhook(
 	}
 
 	// Setup email webhook
-	webhookv1 := webhook.NewResendEmailWebhookV1(mgr.GetClient())
+	webhookv1 := webhook.NewResendEmailWebhookV1(mgr.GetClient(), mgr.GetAPIReader(), senderAddress)
 	err = webhookv1.SetupWithManager(mgr)
 	if err != nil {
 		return fmt.Errorf("failed to setup webhook: %w", err)

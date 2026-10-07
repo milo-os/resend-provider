@@ -51,23 +51,6 @@ const (
 
 // SetupIndexes sets up the required field indexes for webhook operations
 func SetupIndexes(mgr ctrl.Manager) error {
-	// Index Email objects by .status.providerID so that the webhook handler can
-	// quickly look them up when processing incoming events.
-	if err := mgr.GetFieldIndexer().IndexField(
-		context.Background(),
-		&notificationmiloapiscomv1alpha1.Email{},
-		"status.providerID",
-		func(rawObj client.Object) []string {
-			email := rawObj.(*notificationmiloapiscomv1alpha1.Email)
-			if email.Status.ProviderID == "" {
-				return nil
-			}
-			return []string{email.Status.ProviderID}
-		},
-	); err != nil {
-		return fmt.Errorf("failed to createemail  index for providerID: %w", err)
-	}
-
 	// Index ContactGroupMembership objects by .status.providerID so that the webhook handler can
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),

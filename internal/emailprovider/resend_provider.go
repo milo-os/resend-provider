@@ -27,6 +27,11 @@ func (r *ResendEmailProvider) SendEmail(ctx context.Context, input SendEmailInpu
 		DeliveryID: "",
 	}
 
+	tags := make([]resend.Tag, 0, len(input.Tags))
+	for _, tag := range input.Tags {
+		tags = append(tags, resend.Tag{Name: tag.Name, Value: tag.Value})
+	}
+
 	resp, err := r.client.Emails.Send(&resend.SendEmailRequest{
 		From:    input.From,
 		ReplyTo: input.ReplyTo,
@@ -36,6 +41,7 @@ func (r *ResendEmailProvider) SendEmail(ctx context.Context, input SendEmailInpu
 		Subject: input.Subject,
 		Html:    input.HtmlBody,
 		Text:    input.TextBody,
+		Tags:    tags,
 		Headers: map[string]string{
 			"IdempotencyKey": input.IdempotencyKey,
 		},

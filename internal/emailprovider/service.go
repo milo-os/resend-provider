@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	emailtemplating "go.miloapis.com/email-provider-resend/internal/emailtemplanting"
+	"go.miloapis.com/email-provider-resend/internal/resend"
 	notificationmiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/notification/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -79,6 +80,7 @@ func (s *Service) Send(ctx context.Context,
 		HtmlBody:       htmlBody,
 		TextBody:       textBody,
 		IdempotencyKey: string(email.UID),
+		Tags:           resend.EmailRefTags(email.Namespace, email.Name),
 	})
 	if err != nil {
 		return output, fmt.Errorf("error sending email: %w", err)

@@ -3,6 +3,8 @@ package emailprovider
 import (
 	"context"
 	"time"
+
+	rtime "go.miloapis.com/email-provider-resend/internal/resend"
 )
 
 // SendEmailInput contains all the data required to send an email regardless of the underlying provider.
@@ -16,6 +18,8 @@ type SendEmailInput struct {
 	Subject        string
 	HtmlBody       string
 	TextBody       string
+	// Tags are attached to the email and echoed back in webhook events.
+	Tags []rtime.Tag
 }
 
 // SendEmailOutput contains the output of the email provider
