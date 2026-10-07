@@ -33,6 +33,11 @@ import (
 	"go.miloapis.com/email-provider-resend/internal/emailprovider"
 )
 
+// EmailRecipientUserNotFoundReason is a terminal reason set on the Email's
+// Delivered condition when the referenced recipient User no longer exists.
+// Unlike the generic delivery-failure reason, this condition is NOT retried.
+const EmailRecipientUserNotFoundReason = "EmailRecipientUserNotFound"
+
 // EmailReconciler reconciles a Email object
 type EmailController struct {
 	Client        client.Client
@@ -64,6 +69,13 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	log.Info("Reconciling Email", "email", email.Name, "template", email.Spec.TemplateRef.Name, "recipient", email.Spec.Recipient)
 
+	// Terminal failure: the recipient User no longer exists, the email can
+	// never be delivered, and retrying would loop forever. Skip all work.
+	if cond := meta.FindStatusCondition(email.Status.Conditions, notificationmiloapiscomv1alpha1.EmailDeliveredCondition); cond != nil && cond.Reason == EmailRecipientUserNotFoundReason {
+		log.Info("Email is in terminal failed state, recipient user not found. Skipping reconciliation.", "email", email.Name)
+		return ctrl.Result{}, nil
+	}
+
 	// Get EmailTemplate
 	emailTemplate := &notificationmiloapiscomv1alpha1.EmailTemplate{} // Cluster scoped resource
 	err = r.Client.Get(ctx, client.ObjectKey{Name: email.Spec.TemplateRef.Name}, emailTemplate)
@@ -76,6 +88,22 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	// Get EmailRecipient
 	recipientEmailAddress, err := r.getRecipientEmailAddress(ctx, email.DeepCopy())
 	if err != nil {
+		// If the recipient references a User that no longer exists, the email
+		// can never be delivered. Record a terminal failure instead of
+		// retrying forever.
+		if errors.IsNotFound(err) {
+			log.Info("Recipient user not found. Marking email as failed.", "email", email.Name, "userRef", email.Spec.Recipient.UserRef.Name)
+			if statusErr := r.updateEmailStatus(ctx, email, metav1.Condition{
+				Type:               notificationmiloapiscomv1alpha1.EmailDeliveredCondition,
+				Status:             metav1.ConditionFalse,
+				Reason:             EmailRecipientUserNotFoundReason,
+				Message:            fmt.Sprintf("Recipient user %q no longer exists; email cannot be delivered", email.Spec.Recipient.UserRef.Name),
+				LastTransitionTime: metav1.Now(),
+			}); statusErr != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to update Email status: %w", statusErr)
+			}
+			return ctrl.Result{}, nil
+		}
 		log.Error(err, "Failed to get recipient email address", "email", email.Name)
 		return ctrl.Result{}, fmt.Errorf("failed to get recipient email address: %w", err)
 	}

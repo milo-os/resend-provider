@@ -76,6 +76,10 @@ func (f *contactGroupMembershipFinalizer) Finalize(ctx context.Context, obj clie
 	contactGroup := &notificationmiloapiscomv1alpha1.ContactGroup{}
 	err := f.Client.Get(ctx, client.ObjectKey{Name: contactGroupMembership.Spec.ContactGroupRef.Name, Namespace: contactGroupMembership.Spec.ContactGroupRef.Namespace}, contactGroup)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			log.Info("Referenced ContactGroup not found. Probably deleted. ContactGroupMembership finalizer completed.")
+			return finalizer.Result{}, nil
+		}
 		log.Error(err, "Failed to get ContactGroup")
 		return finalizer.Result{}, fmt.Errorf("failed to get ContactGroup: %w", err)
 	}
@@ -84,8 +88,21 @@ func (f *contactGroupMembershipFinalizer) Finalize(ctx context.Context, obj clie
 	contact := &notificationmiloapiscomv1alpha1.Contact{}
 	err = f.Client.Get(ctx, client.ObjectKey{Name: contactGroupMembership.Spec.ContactRef.Name, Namespace: contactGroupMembership.Spec.ContactRef.Namespace}, contact)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			log.Info("Referenced Contact not found. Probably deleted. ContactGroupMembership finalizer completed.")
+			return finalizer.Result{}, nil
+		}
 		log.Error(err, "Failed to get Contact")
 		return finalizer.Result{}, fmt.Errorf("failed to get Contact: %w", err)
+	}
+
+	// The provider-side membership can only exist if both the contact and the
+	// contact group were successfully synced to the email provider. If either
+	// provider ID is empty there is nothing to delete on the provider side, so
+	// the finalizer can complete.
+	if contact.Status.ProviderID == "" || contactGroup.Status.ProviderID == "" {
+		log.Info("Contact or ContactGroup was never synced to email provider. Nothing to delete. ContactGroupMembership finalizer completed.")
+		return finalizer.Result{}, nil
 	}
 
 	// Delete ContactGroupMembership from email provider
@@ -98,9 +115,11 @@ func (f *contactGroupMembershipFinalizer) Finalize(ctx context.Context, obj clie
 		log.Error(err, "Failed to delete ContactGroupMembership from email provider")
 		return finalizer.Result{}, fmt.Errorf("failed to delete ContactGroupMembership from email provider: %w", err)
 	}
+	// The delete call is idempotent: a nil error with Deleted=false means the
+	// membership was already absent on the provider, which is the desired final
+	// state, so the finalizer can complete.
 	if !deleted.Deleted {
-		log.Error(fmt.Errorf("failed to delete ContactGroupMembership from email provider. Expected deleted to be true, got %t", deleted.Deleted), "Failed to delete ContactGroupMembership from email provider")
-		return finalizer.Result{}, fmt.Errorf("failed to delete ContactGroupMembership from email provider. Expected deleted to be true, got %t", deleted.Deleted)
+		log.Info("ContactGroupMembership already deleted on email provider. ContactGroupMembership finalizer completed.")
 	}
 
 	return finalizer.Result{}, nil
@@ -149,6 +168,10 @@ func (r *ContactGroupMembershipController) Reconcile(ctx context.Context, req ct
 	contact := &notificationmiloapiscomv1alpha1.Contact{}
 	err = r.Client.Get(ctx, client.ObjectKey{Name: contactGroupMembership.Spec.ContactRef.Name, Namespace: contactGroupMembership.Spec.ContactRef.Namespace}, contact)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			log.Info("Referenced Contact not found. Probably deleted. Skipping ContactGroupMembership reconciliation.")
+			return ctrl.Result{}, nil
+		}
 		log.Error(err, "Failed to get Contact")
 		return ctrl.Result{}, fmt.Errorf("failed to get Contact: %w", err)
 	}
@@ -157,6 +180,10 @@ func (r *ContactGroupMembershipController) Reconcile(ctx context.Context, req ct
 	contactGroup := &notificationmiloapiscomv1alpha1.ContactGroup{}
 	err = r.Client.Get(ctx, client.ObjectKey{Name: contactGroupMembership.Spec.ContactGroupRef.Name, Namespace: contactGroupMembership.Spec.ContactGroupRef.Namespace}, contactGroup)
 	if err != nil {
+		if errors.IsNotFound(err) {
+			log.Info("Referenced ContactGroup not found. Probably deleted. Skipping ContactGroupMembership reconciliation.")
+			return ctrl.Result{}, nil
+		}
 		log.Error(err, "Failed to get ContactGroup")
 		return ctrl.Result{}, fmt.Errorf("failed to get ContactGroup: %w", err)
 	}

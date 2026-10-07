@@ -25,6 +25,7 @@ import (
 	gomega "github.com/onsi/gomega"
 	iammiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	notificationmiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/notification/v1alpha1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -170,6 +171,63 @@ var _ = ginko.Describe("EmailController.Reconcile", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(res.RequeueAfter).To(gomega.Equal(time.Second))
 			gomega.Expect(fakeProv.SendEmailCallCount).To(gomega.Equal(1))
+		})
+	})
+
+	ginko.Context("when the recipient user no longer exists", func() {
+		var (
+			terminalClient client.Client
+			terminalCtrl   *EmailController
+		)
+
+		ginko.BeforeEach(func() {
+			// Rebuild the fake client WITHOUT the referenced User, simulating a
+			// teardown where the recipient User was already deleted. The template
+			// still exists so reconcile reaches the recipient lookup.
+			sch := scheme.Scheme
+			gomega.Expect(iammiloapiscomv1alpha1.AddToScheme(sch)).To(gomega.Succeed())
+			gomega.Expect(notificationmiloapiscomv1alpha1.AddToScheme(sch)).To(gomega.Succeed())
+
+			template := &notificationmiloapiscomv1alpha1.EmailTemplate{
+				TypeMeta:   metav1.TypeMeta{APIVersion: "notification.miloapis.com/v1alpha1", Kind: "EmailTemplate"},
+				ObjectMeta: metav1.ObjectMeta{Name: "welcome-template"},
+				Spec:       notificationmiloapiscomv1alpha1.EmailTemplateSpec{Subject: "Welcome"},
+			}
+			terminalClient = fake.NewClientBuilder().
+				WithScheme(sch).
+				WithStatusSubresource(&notificationmiloapiscomv1alpha1.Email{}).
+				WithObjects(emailObj.DeepCopy(), template).
+				Build()
+
+			fakeProv.SendEmailCallCount = 0
+			service := emailprovider.NewService(fakeProv, "from@example.com", "reply@example.com")
+			conf, err := config.NewEmailControllerConfig(time.Second, time.Second, time.Second)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			terminalCtrl = &EmailController{Client: terminalClient, EmailProvider: *service, Config: *conf}
+		})
+
+		ginko.It("marks the email terminal-failed and stops retrying", func() {
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: emailObj.Name, Namespace: emailObj.Namespace}}
+
+			// First reconcile: recipient user missing -> terminal condition, no error.
+			res, err := terminalCtrl.Reconcile(ctx, req)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(res).To(gomega.Equal(ctrl.Result{}))
+			gomega.Expect(fakeProv.SendEmailCallCount).To(gomega.Equal(0))
+
+			fetched := &notificationmiloapiscomv1alpha1.Email{}
+			gomega.Expect(terminalClient.Get(ctx, req.NamespacedName, fetched)).To(gomega.Succeed())
+			cond := meta.FindStatusCondition(fetched.Status.Conditions, notificationmiloapiscomv1alpha1.EmailDeliveredCondition)
+			gomega.Expect(cond).NotTo(gomega.BeNil())
+			gomega.Expect(cond.Status).To(gomega.Equal(metav1.ConditionFalse))
+			gomega.Expect(cond.Reason).To(gomega.Equal(EmailRecipientUserNotFoundReason))
+
+			// Second reconcile: the terminal guard short-circuits, so still no
+			// provider call and no error (no retry loop).
+			res, err = terminalCtrl.Reconcile(ctx, req)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(res).To(gomega.Equal(ctrl.Result{}))
+			gomega.Expect(fakeProv.SendEmailCallCount).To(gomega.Equal(0))
 		})
 	})
 
