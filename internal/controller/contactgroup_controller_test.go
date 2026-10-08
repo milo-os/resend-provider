@@ -187,4 +187,17 @@ var _ = ginkgo.Describe("contactGroupFinalizer", func() {
 		gomega.Expect(k8sClient.List(ctx, list)).To(gomega.Succeed())
 		gomega.Expect(list.Items).To(gomega.HaveLen(1)) // still present
 	})
+
+	ginkgo.It("completes when the provider reports the contact group already deleted", func() {
+		// Provider returns Deleted:false with nil error (idempotent no-op):
+		// the contact group was already absent on the provider, so the
+		// finalizer must complete rather than failing.
+		provider = &mockprovider.MockEmailProvider{DeleteContactGroupOutput: emailprovider.DeleteContactGroupOutput{ContactGroupID: "cg-123", Deleted: false}}
+		finalizer = &contactGroupFinalizer{Client: k8sClient, EmailProvider: *emailprovider.NewService(provider, "from@example.com", "reply@example.com")}
+
+		res, err := finalizer.Finalize(ctx, group.DeepCopy())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(res).To(gomega.Equal(finalizerpkg.Result{}))
+		gomega.Expect(provider.DeletedGroupID).To(gomega.Equal("cg-123"))
+	})
 })

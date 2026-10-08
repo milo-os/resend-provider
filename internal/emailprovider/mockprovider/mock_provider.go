@@ -40,9 +40,10 @@ type MockEmailProvider struct {
 	CreateContactGroupMembershipCallCount int
 
 	// DeleteContactGroupMembership
-	DeleteContactGroupMembershipOutput emailprovider.DeleteContactGroupMembershipOutput
-	DeleteContactGroupMembershipErr    error
-	DeleteContactGroupMembershipInputs []emailprovider.DeleteContactGroupMembershipInput
+	DeleteContactGroupMembershipOutput    emailprovider.DeleteContactGroupMembershipOutput
+	DeleteContactGroupMembershipOutputSet bool
+	DeleteContactGroupMembershipErr       error
+	DeleteContactGroupMembershipInputs    []emailprovider.DeleteContactGroupMembershipInput
 
 	// CreateContact tracking
 	CreateContactOutput    emailprovider.CreateContactOutput
@@ -96,7 +97,7 @@ func (m *MockEmailProvider) CreateContactGroupMembership(ctx context.Context, in
 
 func (m *MockEmailProvider) DeleteContactGroupMembership(ctx context.Context, input emailprovider.DeleteContactGroupMembershipInput) (emailprovider.DeleteContactGroupMembershipOutput, error) {
 	m.DeleteContactGroupMembershipInputs = append(m.DeleteContactGroupMembershipInputs, input)
-	if (m.DeleteContactGroupMembershipOutput == emailprovider.DeleteContactGroupMembershipOutput{}) {
+	if !m.DeleteContactGroupMembershipOutputSet {
 		return emailprovider.DeleteContactGroupMembershipOutput{Deleted: true}, m.DeleteContactGroupMembershipErr
 	}
 	return m.DeleteContactGroupMembershipOutput, m.DeleteContactGroupMembershipErr

@@ -141,9 +141,11 @@ func (f *contactGroupFinalizer) Finalize(ctx context.Context, obj client.Object)
 		log.Error(err, "Failed to delete ContactGroup from email provider")
 		return finalizer.Result{}, fmt.Errorf("failed to delete ContactGroup from email provider: %w", err)
 	}
+	// The delete call is idempotent: a nil error with Deleted=false means the
+	// contact group was already absent on the provider, which is the desired
+	// final state, so the finalizer can complete.
 	if !delResult.Deleted {
-		log.Error(fmt.Errorf("failed to delete ContactGroup from email provider. Expected deleted to be true, got %t", delResult.Deleted), "Failed to delete ContactGroup from email provider")
-		return finalizer.Result{}, fmt.Errorf("failed to delete ContactGroup from email provider. Expected deleted to be true, got %t", delResult.Deleted)
+		log.Info("ContactGroup already deleted on email provider. Contact Group finalizer completed.")
 	}
 
 	log.Info("Contact group finalizer completed")

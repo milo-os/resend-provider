@@ -34,6 +34,8 @@ import (
 	finalizerpkg "sigs.k8s.io/controller-runtime/pkg/finalizer"
 )
 
+const testMembershipProviderID = "cgm-1"
+
 var _ = ginkgo.Describe("ContactGroupMembershipController", func() {
 	var (
 		ctx        context.Context
@@ -86,7 +88,7 @@ var _ = ginkgo.Describe("ContactGroupMembershipController", func() {
 
 		prov := &mockprovider.MockEmailProvider{
 			CreateContactGroupOutput:           emailprovider.CreateContactGroupOutput{ContactGroupID: "cg-1"},
-			CreateContactGroupMembershipOutput: emailprovider.CreateContactGroupMembershipOutput{ContactGroupMembershipID: "cgm-1"},
+			CreateContactGroupMembershipOutput: emailprovider.CreateContactGroupMembershipOutput{ContactGroupMembershipID: testMembershipProviderID},
 		}
 		svc := emailprovider.NewService(prov, "from@example.com", "reply@example.com")
 		controller = &ContactGroupMembershipController{Client: k8sClient, EmailProvider: *svc}
@@ -101,7 +103,7 @@ var _ = ginkgo.Describe("ContactGroupMembershipController", func() {
 			fetched := &notificationv1.ContactGroupMembership{}
 			gomega.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: membership.Name, Namespace: membership.Namespace}, fetched)).To(gomega.Succeed())
 
-			gomega.Expect(fetched.Status.ProviderID).To(gomega.Equal("cgm-1"))
+			gomega.Expect(fetched.Status.ProviderID).To(gomega.Equal(testMembershipProviderID))
 			// Check status.username is set from contact's SubjectRef
 			gomega.Expect(fetched.Status.Username).To(gomega.Equal("alice-user"))
 			// Check Resend-specific condition (this controller only manages Resend)
@@ -126,7 +128,7 @@ var _ = ginkgo.Describe("ContactGroupMembershipController", func() {
 
 			// membership with ProviderID
 			membershipWithID := membership.DeepCopy()
-			membershipWithID.Status.ProviderID = "cgm-1"
+			membershipWithID.Status.ProviderID = testMembershipProviderID
 
 			// corresponding removal object expected to be deleted by finalizer
 			removal := &notificationv1.ContactGroupMembershipRemoval{
@@ -152,14 +154,89 @@ var _ = ginkgo.Describe("ContactGroupMembershipController", func() {
 			finalizer = &contactGroupMembershipFinalizer{Client: k8sClientFinal, EmailProvider: *svc}
 		})
 
-		ginkgo.It("deletes membership on provider", func() {
-			// Use object with ProviderID set so finalizer passes correct ID to provider
+		ginkgo.It("completes when the referenced contact no longer exists", func() {
+			// The fake client in BeforeEach does NOT contain the referenced
+			// contact, simulating a teardown where the contact was already
+			// deleted. The finalizer must complete rather than failing.
 			obj := membership.DeepCopy()
-			obj.Status.ProviderID = "cgm-1"
+			obj.Status.ProviderID = testMembershipProviderID
 			res, err := finalizer.Finalize(ctx, obj)
-			gomega.Expect(err).To(gomega.HaveOccurred())
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(res).To(gomega.Equal(finalizerpkg.Result{}))
+		})
 
+		ginkgo.It("deletes membership on provider when the referenced resources exist", func() {
+			// The referenced contact must be synced to the provider (has a
+			// Status.ProviderID) for the finalizer to reach the provider delete
+			// call.
+			syncedContact := contact.DeepCopy()
+			syncedContact.Status.ProviderID = "c-1"
+			sch := scheme.Scheme
+			gomega.Expect(notificationv1.AddToScheme(sch)).To(gomega.Succeed())
+			membershipWithID := membership.DeepCopy()
+			membershipWithID.Status.ProviderID = testMembershipProviderID
+			k8sClientFinal = fake.NewClientBuilder().
+				WithScheme(sch).
+				WithObjects(syncedContact, contactGroup.DeepCopy(), membershipWithID).
+				Build()
+			finalizer = &contactGroupMembershipFinalizer{Client: k8sClientFinal, EmailProvider: *svc}
+
+			obj := membership.DeepCopy()
+			obj.Status.ProviderID = testMembershipProviderID
+			res, err := finalizer.Finalize(ctx, obj)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(res).To(gomega.Equal(finalizerpkg.Result{}))
+			// Mock default returns Deleted:true.
+			gomega.Expect(fakeProv.DeleteContactGroupMembershipInputs).To(gomega.HaveLen(1))
+		})
+
+		ginkgo.It("completes when the provider reports the membership already deleted", func() {
+			// Same client as the previous test: the referenced resources exist
+			// and the contact was synced to the provider.
+			syncedContact := contact.DeepCopy()
+			syncedContact.Status.ProviderID = "c-1"
+			sch := scheme.Scheme
+			gomega.Expect(notificationv1.AddToScheme(sch)).To(gomega.Succeed())
+			membershipWithID := membership.DeepCopy()
+			membershipWithID.Status.ProviderID = testMembershipProviderID
+			k8sClientFinal = fake.NewClientBuilder().
+				WithScheme(sch).
+				WithObjects(syncedContact, contactGroup.DeepCopy(), membershipWithID).
+				Build()
+			finalizer = &contactGroupMembershipFinalizer{Client: k8sClientFinal, EmailProvider: *svc}
+
+			// Provider returns Deleted:false with no error (idempotent no-op).
+			fakeProv.DeleteContactGroupMembershipOutputSet = true
+			fakeProv.DeleteContactGroupMembershipOutput = emailprovider.DeleteContactGroupMembershipOutput{Deleted: false}
+
+			obj := membership.DeepCopy()
+			obj.Status.ProviderID = testMembershipProviderID
+			res, err := finalizer.Finalize(ctx, obj)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(res).To(gomega.Equal(finalizerpkg.Result{}))
+			gomega.Expect(fakeProv.DeleteContactGroupMembershipInputs).To(gomega.HaveLen(1))
+		})
+
+		ginkgo.It("completes when the provider IDs were never set (nothing to delete)", func() {
+			// The referenced contact exists but was never synced to the
+			// provider (no Status.ProviderID), so the finalizer must complete
+			// without calling the provider.
+			sch := scheme.Scheme
+			gomega.Expect(notificationv1.AddToScheme(sch)).To(gomega.Succeed())
+			notSyncedContact := contact.DeepCopy()
+			notSyncedContact.Status.ProviderID = ""
+			k8sClientFinal = fake.NewClientBuilder().
+				WithScheme(sch).
+				WithObjects(notSyncedContact, contactGroup.DeepCopy(), membership.DeepCopy()).
+				Build()
+			finalizer = &contactGroupMembershipFinalizer{Client: k8sClientFinal, EmailProvider: *svc}
+
+			obj := membership.DeepCopy()
+			obj.Status.ProviderID = testMembershipProviderID
+			res, err := finalizer.Finalize(ctx, obj)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(res).To(gomega.Equal(finalizerpkg.Result{}))
+			gomega.Expect(fakeProv.DeleteContactGroupMembershipInputs).To(gomega.BeEmpty())
 		})
 	})
 })

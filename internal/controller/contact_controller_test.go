@@ -210,4 +210,17 @@ var _ = ginkgo.Describe("contactFinalizer", func() {
 		gomega.Expect(k8sClient.List(ctx, list)).To(gomega.Succeed())
 		gomega.Expect(list.Items).To(gomega.HaveLen(1)) // still present
 	})
+
+	ginkgo.It("completes when the provider reports the contact already deleted", func() {
+		// Provider returns Deleted:false with nil error (idempotent no-op):
+		// the contact was already absent on the provider, so the finalizer
+		// must complete rather than failing.
+		prov = &mockprovider.MockEmailProvider{DeleteContactOutput: emailprovider.DeleteContactOutput{Deleted: false}}
+		finalizer = &contactFinalizer{Client: k8sClient, EmailProvider: *emailprovider.NewService(prov, "from", "reply")}
+
+		res, err := finalizer.Finalize(ctx, contact.DeepCopy())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(res).To(gomega.Equal(finalizerpkg.Result{}))
+		gomega.Expect(prov.DeleteContactCallCount).To(gomega.Equal(1))
+	})
 })
