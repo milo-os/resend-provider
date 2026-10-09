@@ -247,7 +247,7 @@ var _ = ginko.Describe("EmailController.Reconcile", func() {
 			service := emailprovider.NewService(fakeProv, "from@example.com", "reply@example.com")
 			conf, err := config.NewEmailControllerConfig(time.Second, time.Second, time.Second)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			terminalCtrl = &EmailController{Client: terminalClient, EmailProvider: *service, Config: *conf}
+			terminalCtrl = &EmailController{Client: terminalClient, APIReader: terminalClient, EmailProvider: *service, Config: *conf}
 		})
 
 		ginko.It("marks the email terminal-failed and stops retrying", func() {
