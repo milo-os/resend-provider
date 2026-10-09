@@ -110,7 +110,7 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		// retrying forever.
 		if errors.IsNotFound(err) {
 			log.Info("Recipient user not found. Marking email as failed.", "email", email.Name, "userRef", email.Spec.Recipient.UserRef.Name)
-			if statusErr := r.updateEmailStatus(ctx, email, metav1.Condition{
+			if statusErr := r.updateEmailStatus(ctx, base, email, metav1.Condition{
 				Type:               notificationmiloapiscomv1alpha1.EmailDeliveredCondition,
 				Status:             metav1.ConditionFalse,
 				Reason:             EmailRecipientUserNotFoundReason,
