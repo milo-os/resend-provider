@@ -98,7 +98,7 @@ func (f *contactGroupFinalizer) Finalize(ctx context.Context, obj client.Object)
 	}
 	if len(notDeletedContactGroupMemberships.Items) > 0 {
 		log.Info("Waiting for ContactGroupMembership deletions", "count", len(notDeletedContactGroupMemberships.Items))
-		return finalizer.Result{}, fmt.Errorf("waiting for %d ContactGroupMembership deletions", len(notDeletedContactGroupMemberships.Items))
+		return finalizer.Result{}, fmt.Errorf("%w: %d ContactGroupMemberships", errDependentsRemaining, len(notDeletedContactGroupMemberships.Items))
 	}
 
 	// Get ContactGroupMembershipRemoval that references this ContactGroup
@@ -177,6 +177,10 @@ func (r *ContactGroupController) Reconcile(ctx context.Context, req ctrl.Request
 
 	// Run finalizers
 	finalizeResult, err := r.Finalizers.Finalize(ctx, contactGroup)
+	if onlyWaitingForDependents(err) {
+		log.Info("Waiting for dependents to be deleted before finalizing ContactGroup", "reason", err.Error())
+		return ctrl.Result{RequeueAfter: dependentsRequeueAfter}, nil
+	}
 	if err != nil {
 		log.Error(err, "Failed to run finalizers for ContactGroup")
 		return ctrl.Result{}, fmt.Errorf("failed to run finalizers for ContactGroup: %w", err)

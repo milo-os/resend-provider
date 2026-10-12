@@ -101,6 +101,57 @@ var _ = ginkgo.Describe("ContactGroupController", func() {
 			gomega.Expect(cond.ObservedGeneration).To(gomega.Equal(int64(2)))
 		})
 	})
+
+	ginkgo.Context("when a deleted contact group still has memberships being deleted", func() {
+		ginkgo.It("requeues without an error and keeps its finalizer", func() {
+			now := metav1.Now()
+			deleting := &notificationv1.ContactGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:         "default",
+					Name:              "deleting-team",
+					DeletionTimestamp: &now,
+					Finalizers:        []string{contactGroupFinalizerKey},
+				},
+			}
+			// The membership's own finalizer keeps it terminating after the
+			// contact group's finalizer deletes it.
+			member := &notificationv1.ContactGroupMembership{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:  "default",
+					Name:       "member-1",
+					Finalizers: []string{contactGroupMembershipFinalizerKey},
+				},
+				Spec: notificationv1.ContactGroupMembershipSpec{
+					ContactRef:      notificationv1.ContactReference{Name: "john", Namespace: "default"},
+					ContactGroupRef: notificationv1.ContactGroupReference{Name: deleting.Name, Namespace: deleting.Namespace},
+				},
+			}
+			k8sClient = fake.NewClientBuilder().
+				WithScheme(scheme.Scheme).
+				WithObjects(deleting, member).
+				WithIndex(&notificationv1.ContactGroupMembership{}, contactGroupNamespacedIndexKey, func(raw client.Object) []string {
+					c := raw.(*notificationv1.ContactGroupMembership)
+					return []string{buildContactGroupNamespacedIndexKey(c.Spec.ContactGroupRef.Name, c.Spec.ContactGroupRef.Namespace)}
+				}).
+				WithIndex(&notificationv1.ContactGroupMembershipRemoval{}, contactGroupToCgmrNamespacedIndexKey, func(raw client.Object) []string {
+					c := raw.(*notificationv1.ContactGroupMembershipRemoval)
+					return []string{buildContactGroupNamespacedIndexKey(c.Spec.ContactGroupRef.Name, c.Spec.ContactGroupRef.Namespace)}
+				}).
+				Build()
+			svc := emailprovider.NewService(provider, "from@example.com", "reply@example.com")
+			controller = &ContactGroupController{Client: k8sClient, EmailProvider: *svc, Finalizers: finalizerpkg.NewFinalizers()}
+			gomega.Expect(controller.Finalizers.Register(contactGroupFinalizerKey, &contactGroupFinalizer{Client: k8sClient, EmailProvider: *svc})).To(gomega.Succeed())
+
+			res, err := controller.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: deleting.Name, Namespace: deleting.Namespace}})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(res).To(gomega.Equal(ctrl.Result{RequeueAfter: dependentsRequeueAfter}))
+
+			fetched := &notificationv1.ContactGroup{}
+			gomega.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: deleting.Name, Namespace: deleting.Namespace}, fetched)).To(gomega.Succeed())
+			gomega.Expect(fetched.Finalizers).To(gomega.ContainElement(contactGroupFinalizerKey))
+			gomega.Expect(provider.DeletedGroupID).To(gomega.BeEmpty())
+		})
+	})
 })
 
 var _ = ginkgo.Describe("contactGroupFinalizer", func() {

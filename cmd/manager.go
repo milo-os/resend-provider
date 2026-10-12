@@ -293,6 +293,11 @@ func runManager(
 	resendEmailProvider := emailprovider.NewResendEmailProvider(emailConfig.GetAPIKey())
 	emailProviderService := emailprovider.NewService(resendEmailProvider, emailConfig.GetFrom(), emailConfig.GetReplyTo())
 
+	if err := controller.SetupIndexes(mgr); err != nil {
+		setupLog.Error(err, "unable to set up field indexes")
+		return fmt.Errorf("unable to set up field indexes: %w", err)
+	}
+
 	// Setup email controller
 	if err := (&controller.EmailController{
 		Client:        mgr.GetClient(),
