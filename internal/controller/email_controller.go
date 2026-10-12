@@ -148,6 +148,10 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	// We set this ONLY on the first successful send so that future webhook
 	// updates (Delivered / Failed) are not overwritten by subsequent
 	// reconciliations.
+	//
+	// Writing pending here can't undo a webhook update: the webhook finds an
+	// Email only by this provider ID, which this same patch records, and the
+	// optimistic lock rejects the patch if the Email changed since it was read.
 	email.Status.ProviderID = output.DeliveryID
 	email.Status.HTMLBody = output.HTMLBody
 	email.Status.TextBody = output.TextBody
