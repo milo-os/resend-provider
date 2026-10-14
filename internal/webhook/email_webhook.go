@@ -67,6 +67,23 @@ func NewResendEmailWebhookV1(k8sClient client.Client, reader client.Reader, send
 
 			emailCondition := resend.GetEmailCondition(emailEvent.Envelope.Type)
 
+			// Delivery status only moves forward. A late event, such as a retried
+			// email.sent arriving after email.delivered, is recorded as an Event
+			// but leaves the Email unchanged. It still gets a 2xx, so Resend stops
+			// retrying it.
+			existing := meta.FindStatusCondition(email.Status.Conditions, notificationmiloapiscomv1alpha1.EmailDeliveredCondition)
+			if !emailCondition.Supersedes(existing) {
+				log.Info("Ignoring late event", "event", emailEvent.Envelope.Type, "email", email.Name,
+					"status", existing.Status, "reason", existing.Reason)
+				note := fmt.Sprintf("Ignored late webhook event %s: Delivered is already %s (%s)",
+					emailEvent.Envelope.Type, existing.Status, existing.Reason)
+				if err := recordEvent(ctx, k8sClient, email, lateEventIgnoredReason, note, corev1.EventTypeNormal); err != nil {
+					log.Error(err, "Failed to create Event", "email", email.Name)
+					return InternalServerErrorResponse()
+				}
+				return OkResponse()
+			}
+
 			// Update email status
 			condition := metav1.Condition{
 				Type:               notificationmiloapiscomv1alpha1.EmailDeliveredCondition,
@@ -82,29 +99,7 @@ func NewResendEmailWebhookV1(k8sClient client.Client, reader client.Reader, send
 				return InternalServerErrorResponse()
 			}
 
-			// Emit Kubernetes Event for observability
-			webhookEvent := &eventsv1.Event{
-				ObjectMeta: metav1.ObjectMeta{
-					GenerateName: fmt.Sprintf("%s-", email.Name),
-					Namespace:    email.Namespace,
-				},
-				Action:              "Update",
-				Reason:              condition.Reason,
-				Note:                condition.Message,
-				Type:                emailCondition.CoreEventType,
-				EventTime:           metav1.MicroTime{Time: time.Now()},
-				ReportingController: "email-provider-resend-webhook",
-				ReportingInstance:   "email-provider-resend-webhook-1",
-				Regarding: corev1.ObjectReference{
-					Kind:            "Email",
-					Namespace:       email.Namespace,
-					Name:            email.Name,
-					UID:             email.UID,
-					ResourceVersion: email.ResourceVersion,
-					APIVersion:      notificationmiloapiscomv1alpha1.SchemeGroupVersion.String(),
-				},
-			}
-			if err := k8sClient.Create(ctx, webhookEvent); err != nil {
+			if err := recordEvent(ctx, k8sClient, email, condition.Reason, condition.Message, emailCondition.CoreEventType); err != nil {
 				log.Error(err, "Failed to create Event", "email", email.Name)
 				return InternalServerErrorResponse()
 			}
@@ -115,6 +110,35 @@ func NewResendEmailWebhookV1(k8sClient client.Client, reader client.Reader, send
 		}),
 		Endpoint: "/apis/emailnotification.k8s.io/v1/resend/emails",
 	}
+}
+
+// lateEventIgnoredReason is the Event reason recorded for a webhook event that
+// arrived after a later one and so left the Email unchanged.
+const lateEventIgnoredReason = "LateEventIgnored"
+
+// recordEvent records a Kubernetes Event about email for observability.
+func recordEvent(ctx context.Context, c client.Client, email *notificationmiloapiscomv1alpha1.Email, reason, note, eventType string) error {
+	return c.Create(ctx, &eventsv1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: fmt.Sprintf("%s-", email.Name),
+			Namespace:    email.Namespace,
+		},
+		Action:              "Update",
+		Reason:              reason,
+		Note:                note,
+		Type:                eventType,
+		EventTime:           metav1.MicroTime{Time: time.Now()},
+		ReportingController: "email-provider-resend-webhook",
+		ReportingInstance:   "email-provider-resend-webhook-1",
+		Regarding: corev1.ObjectReference{
+			Kind:            "Email",
+			Namespace:       email.Namespace,
+			Name:            email.Name,
+			UID:             email.UID,
+			ResourceVersion: email.ResourceVersion,
+			APIVersion:      notificationmiloapiscomv1alpha1.SchemeGroupVersion.String(),
+		},
+	})
 }
 
 // findEmail returns the Email that a webhook event belongs to.
@@ -138,6 +162,16 @@ func findEmail(
 				return nil, fmt.Errorf("%w: tagged email %s does not exist", errEmailNotFound, ref)
 			}
 			return nil, fmt.Errorf("failed to get email %s: %w", ref, err)
+		}
+		// The controller records the provider ID only after Resend accepts the
+		// send, so the first events can arrive before it does. They are refused
+		// with 404 like any unmatched event: Resend retries them, and because
+		// delivery status only moves forward, the order the retries arrive in
+		// doesn't matter. Recording an event against an Email with no provider
+		// ID would trust the tags alone, which the provider ID check exists to
+		// avoid.
+		if email.Status.ProviderID == "" {
+			return nil, fmt.Errorf("%w: tagged email %s has no providerID yet", errEmailNotFound, ref)
 		}
 		if email.Status.ProviderID != event.EmailID {
 			return nil, fmt.Errorf("%w: tagged email %s has providerID %q", errEmailNotFound, ref, email.Status.ProviderID)

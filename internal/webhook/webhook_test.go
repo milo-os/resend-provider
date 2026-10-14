@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -314,4 +315,129 @@ func TestNewResendWebhookV1_TaggedForeignSenderStillHandled(t *testing.T) {
 		t.Fatalf("expected %d got %d", http.StatusOK, resp.HttpStatus)
 	}
 	assertDelivered(t, getEmail(t, k8sClient, email.Namespace, email.Name))
+}
+
+const orderedProviderID = "provider-1"
+
+// taggedEvent is a Resend event for email's send, which has provider ID
+// orderedProviderID.
+func taggedEvent(eventType resend.EmailEventType, email *notificationv1alpha1.Email) *resend.ParsedEvent {
+	return &resend.ParsedEvent{
+		Envelope: resend.EventEnvelope{Type: eventType},
+		Base: resend.EmailBase{
+			EmailID: orderedProviderID,
+			From:    "Datum <" + testSender + ">",
+			Tags:    resend.EmailRefTags(email.Namespace, email.Name),
+		},
+	}
+}
+
+func handle(t *testing.T, wh *Webhook, event *resend.ParsedEvent, want int) {
+	t.Helper()
+	if resp := wh.Handler.Handle(context.TODO(), Request{EmailEvent: event}); resp.HttpStatus != want {
+		t.Fatalf("%s: expected %d got %d", event.Envelope.Type, want, resp.HttpStatus)
+	}
+}
+
+func assertDeliveredCondition(t *testing.T, email *notificationv1alpha1.Email, status metav1.ConditionStatus, reason string) {
+	t.Helper()
+	cond := meta.FindStatusCondition(email.Status.Conditions, notificationv1alpha1.EmailDeliveredCondition)
+	if cond == nil || cond.Status != status || cond.Reason != reason {
+		t.Fatalf("email %s: want Delivered=%s (%s), got %+v", email.Name, status, reason, cond)
+	}
+}
+
+// Resend doesn't guarantee event order, so delivery status only moves forward:
+// pending < delivered < failed.
+func TestNewResendWebhookV1_DeliveryStatusOnlyMovesForward(t *testing.T) {
+	const delivered, failed = notificationv1alpha1.EmailDeliveredReason, notificationv1alpha1.EmailDeliveryFailedReason
+	tests := []struct {
+		name       string
+		events     []resend.EmailEventType
+		wantStatus metav1.ConditionStatus
+		wantReason string
+	}{
+		{"delivered then sent stays delivered",
+			[]resend.EmailEventType{resend.EventTypeDelivered, resend.EventTypeSent},
+			metav1.ConditionTrue, delivered},
+		{"delivered then delayed stays delivered",
+			[]resend.EmailEventType{resend.EventTypeDelivered, resend.EventTypeDeliveredDelayed},
+			metav1.ConditionTrue, delivered},
+		{"delivered then bounced records the bounce",
+			[]resend.EmailEventType{resend.EventTypeDelivered, resend.EventTypeBounced},
+			metav1.ConditionFalse, failed},
+		{"bounced then delivered keeps the bounce",
+			[]resend.EmailEventType{resend.EventTypeBounced, resend.EventTypeDelivered},
+			metav1.ConditionFalse, failed},
+		{"bounced then sent keeps the bounce",
+			[]resend.EmailEventType{resend.EventTypeBounced, resend.EventTypeSent},
+			metav1.ConditionFalse, failed},
+		{"sent then delivered is delivered",
+			[]resend.EmailEventType{resend.EventTypeSent, resend.EventTypeDelivered},
+			metav1.ConditionTrue, delivered},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			email := newEmail("ordered", orderedProviderID)
+			wh, k8sClient, _ := newWebhook(t, email)
+			for _, e := range tt.events {
+				handle(t, wh, taggedEvent(e, email), http.StatusOK)
+			}
+			got := getEmail(t, k8sClient, email.Namespace, email.Name)
+			assertDeliveredCondition(t, got, tt.wantStatus, tt.wantReason)
+			if got.Status.HTMLBody != "<p>html body of ordered</p>" {
+				t.Fatalf("bodies not preserved: %q", got.Status.HTMLBody)
+			}
+		})
+	}
+}
+
+// A late event that's ignored is still recorded as an Event.
+func TestNewResendWebhookV1_LateEventRecorded(t *testing.T) {
+	email := newEmail("late", orderedProviderID)
+	wh, k8sClient, _ := newWebhook(t, email)
+	handle(t, wh, taggedEvent(resend.EventTypeDelivered, email), http.StatusOK)
+	handle(t, wh, taggedEvent(resend.EventTypeSent, email), http.StatusOK)
+
+	evList := &eventsv1.EventList{}
+	if err := k8sClient.List(context.TODO(), evList); err != nil {
+		t.Fatalf("failed to list events: %v", err)
+	}
+	reasons := make([]string, 0, len(evList.Items))
+	for _, ev := range evList.Items {
+		reasons = append(reasons, ev.Reason)
+	}
+	if len(reasons) != 2 || !slices.Contains(reasons, lateEventIgnoredReason) {
+		t.Fatalf("expected a delivery Event and a %s Event, got %v", lateEventIgnoredReason, reasons)
+	}
+}
+
+// The sequence seen in production on 12 October 2026 (#38): Resend's first
+// events arrive before the controller records the provider ID, are refused,
+// and are retried in reverse order.
+func TestNewResendWebhookV1_ProductionRetrySequenceEndsDelivered(t *testing.T) {
+	email := newEmail("suspicious-login", "")
+	wh, k8sClient, _ := newWebhook(t, email)
+
+	handle(t, wh, taggedEvent(resend.EventTypeSent, email), http.StatusNotFound)
+	handle(t, wh, taggedEvent(resend.EventTypeDelivered, email), http.StatusNotFound)
+
+	// The controller records the provider ID after the send.
+	sent := getEmail(t, k8sClient, email.Namespace, email.Name)
+	sent.Status.ProviderID = orderedProviderID
+	meta.SetStatusCondition(&sent.Status.Conditions, metav1.Condition{
+		Type:   notificationv1alpha1.EmailDeliveredCondition,
+		Status: metav1.ConditionUnknown,
+		Reason: notificationv1alpha1.EmailDeliveryPendingReason,
+	})
+	if err := k8sClient.Status().Update(context.TODO(), sent); err != nil {
+		t.Fatalf("failed to record provider ID: %v", err)
+	}
+
+	// Resend's retries arrive delivered first, then sent.
+	handle(t, wh, taggedEvent(resend.EventTypeDelivered, email), http.StatusOK)
+	handle(t, wh, taggedEvent(resend.EventTypeSent, email), http.StatusOK)
+
+	assertDeliveredCondition(t, getEmail(t, k8sClient, email.Namespace, email.Name),
+		metav1.ConditionTrue, notificationv1alpha1.EmailDeliveredReason)
 }
