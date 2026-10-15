@@ -40,7 +40,6 @@ import (
 
 const (
 	contactGroupMembershipFinalizerKey = "notification.miloapis.com/contactgroupmembership"
-	cgmByContactNamespacedNameIndexKey = "cgm-by-contact-namespaced-name-index"
 )
 
 const (
@@ -274,13 +273,7 @@ func (r *ContactGroupMembershipController) SetupWithManager(mgr ctrl.Manager) er
 	}); err != nil {
 		return fmt.Errorf("failed to index contactgroupmembership by contact ref and contact group ref: %w", err)
 	}
-	// Index by contact namespaced key for efficient lookup from contact updates
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &notificationmiloapiscomv1alpha1.ContactGroupMembership{}, cgmByContactNamespacedNameIndexKey, func(rawObj client.Object) []string {
-		cgm := rawObj.(*notificationmiloapiscomv1alpha1.ContactGroupMembership)
-		return []string{buildContactNamespacedIndexKey(cgm.Spec.ContactRef.Name, cgm.Spec.ContactRef.Namespace)}
-	}); err != nil {
-		return fmt.Errorf("failed to index contactgroupmembership by contact name: %w", err)
-	}
+	// ContactGroupMemberships are indexed by contact in SetupIndexes.
 
 	r.Finalizers = finalizer.NewFinalizers()
 	if err := r.Finalizers.Register(contactGroupMembershipFinalizerKey, &contactGroupMembershipFinalizer{
@@ -315,7 +308,7 @@ func (r *ContactGroupMembershipController) enqueueContactForContactGroupMembersh
 	}
 
 	cgmList := &notificationmiloapiscomv1alpha1.ContactGroupMembershipList{}
-	err := r.Client.List(ctx, cgmList, client.MatchingFields{cgmByContactNamespacedNameIndexKey: buildContactNamespacedIndexKey(contact.Name, contact.Namespace)})
+	err := r.Client.List(ctx, cgmList, client.MatchingFields{contactNamespacedIndexKey: buildContactNamespacedIndexKey(contact.Name, contact.Namespace)})
 	if err != nil {
 		log.Error(err, "Failed to list ContactGroupMembership")
 		return nil

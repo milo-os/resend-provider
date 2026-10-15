@@ -123,7 +123,7 @@ func (f *contactFinalizer) Finalize(ctx context.Context, obj client.Object) (fin
 	}
 	if len(notDeletedContactGroupMemberships.Items) > 0 {
 		log.Info("Waiting for ContactGroupMembership deletions", "count", len(notDeletedContactGroupMemberships.Items))
-		return finalizer.Result{}, fmt.Errorf("waiting for %d ContactGroupMembership deletions", len(notDeletedContactGroupMemberships.Items))
+		return finalizer.Result{}, fmt.Errorf("%w: %d ContactGroupMemberships", errDependentsRemaining, len(notDeletedContactGroupMemberships.Items))
 	}
 
 	// Get ContactGroupMembershipRemoval that references this Contact
@@ -173,6 +173,10 @@ func (r *ContactController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Run finalizers
 	finalizeResult, err := r.Finalizers.Finalize(ctx, contact)
+	if onlyWaitingForDependents(err) {
+		log.Info("Waiting for dependents to be deleted before finalizing Contact", "reason", err.Error())
+		return ctrl.Result{RequeueAfter: dependentsRequeueAfter}, nil
+	}
 	if err != nil {
 		log.Error(err, "Failed to run finalizers for Contact")
 		return ctrl.Result{}, fmt.Errorf("failed to run finalizers for Contact: %w", err)
@@ -298,13 +302,7 @@ func (r *ContactController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ContactController) SetupWithManager(mgr ctrl.Manager) error {
-	// Index by contact group membership for efficient contact group membership lookup
-	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &notificationmiloapiscomv1alpha1.ContactGroupMembership{}, contactNamespacedIndexKey, func(rawObj client.Object) []string {
-		cgm := rawObj.(*notificationmiloapiscomv1alpha1.ContactGroupMembership)
-		return []string{buildContactNamespacedIndexKey(cgm.Spec.ContactRef.Name, cgm.Spec.ContactRef.Namespace)}
-	}); err != nil {
-		return fmt.Errorf("failed to index contactgroupmembership by contact name: %w", err)
-	}
+	// ContactGroupMemberships are indexed by contact in SetupIndexes.
 
 	// Index by contact group membership removal for efficient contact group membership removal lookup
 	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &notificationmiloapiscomv1alpha1.ContactGroupMembershipRemoval{}, contactNamespacedIndexKey, func(rawObj client.Object) []string {
