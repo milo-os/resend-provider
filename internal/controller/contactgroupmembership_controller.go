@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"go.miloapis.com/email-provider-resend/internal/emailprovider"
 	notificationmiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/notification/v1alpha1"
@@ -247,7 +248,7 @@ func (r *ContactGroupMembershipController) Reconcile(ctx context.Context, req ct
 		})
 	}
 
-	r.verifyContactGroupMembershipReadyCondition(contactGroupMembership)
+	r.verifyContactGroupMembershipReadyCondition(contactGroupMembership, contactGroup)
 
 	// Update status if it changed
 	if !equality.Semantic.DeepEqual(oldStatus, &contactGroupMembership.Status) {
@@ -324,44 +325,62 @@ func (r *ContactGroupMembershipController) enqueueContactForContactGroupMembersh
 	return reqs
 }
 
-// verifyContactReadyCondition is a function that verifies the ContactReadyCondition
-func (r *ContactGroupMembershipController) verifyContactGroupMembershipReadyCondition(cgm *notificationmiloapiscomv1alpha1.ContactGroupMembership) {
-	// Update contact status if it changed
-	// Aggregate readiness across providers: Loops and Resend
-	loopsCond := meta.FindStatusCondition(cgm.Status.Conditions, LoopsContactGroupMembershipReadyCondition)
-	resendCond := meta.FindStatusCondition(cgm.Status.Conditions, ResendContactGroupMembershipReadyCondition)
-	allReady := loopsCond != nil && loopsCond.Status == metav1.ConditionTrue &&
-		resendCond != nil && resendCond.Status == metav1.ConditionTrue
+// readinessProvider names a provider whose condition a membership's overall Ready waits for.
+type readinessProvider struct {
+	name      string
+	condition string
+}
 
-	if allReady {
-		meta.SetStatusCondition(&cgm.Status.Conditions, metav1.Condition{
-			Type:               notificationmiloapiscomv1alpha1.ContactGroupMembershipReadyCondition,
-			Status:             metav1.ConditionTrue,
-			Reason:             "AllProvidersReady",
-			Message:            "Loops and Resend contact group membership are ready",
-			LastTransitionTime: metav1.Now(),
-			ObservedGeneration: cgm.GetGeneration(),
-		})
-	} else {
-		// Build informative not-ready message
-		notReadyMsg := ""
-		if loopsCond == nil {
-			notReadyMsg += "Loops: condition missing; "
-		} else if loopsCond.Status != metav1.ConditionTrue {
-			notReadyMsg += fmt.Sprintf("Loops: %s (%s); ", loopsCond.Reason, loopsCond.Message)
+// requiredProviders returns the providers a membership's overall Ready waits for. Resend serves every contact
+// group; Loops serves only the groups that list it.
+func requiredProviders(cg *notificationmiloapiscomv1alpha1.ContactGroup) []readinessProvider {
+	resend := readinessProvider{name: "Resend", condition: ResendContactGroupMembershipReadyCondition}
+	for _, provider := range cg.Spec.Providers {
+		if provider.Name == "Loops" {
+			return []readinessProvider{{name: "Loops", condition: LoopsContactGroupMembershipReadyCondition}, resend}
 		}
-		if resendCond == nil {
-			notReadyMsg += "Resend: condition missing; "
-		} else if resendCond.Status != metav1.ConditionTrue {
-			notReadyMsg += fmt.Sprintf("Resend: %s (%s); ", resendCond.Reason, resendCond.Message)
-		}
-		meta.SetStatusCondition(&cgm.Status.Conditions, metav1.Condition{
-			Type:               notificationmiloapiscomv1alpha1.ContactGroupMembershipReadyCondition,
-			Status:             metav1.ConditionFalse,
-			Reason:             "ProvidersNotReady",
-			Message:            notReadyMsg,
-			LastTransitionTime: metav1.Now(),
-			ObservedGeneration: cgm.GetGeneration(),
-		})
 	}
+	return []readinessProvider{resend}
+}
+
+// notReadyReason returns why a provider's condition is not ready, or "" when it is.
+func notReadyReason(name string, cond *metav1.Condition) string {
+	switch {
+	case cond == nil:
+		return name + ": condition missing; "
+	case cond.Status != metav1.ConditionTrue:
+		return fmt.Sprintf("%s: %s (%s); ", name, cond.Reason, cond.Message)
+	}
+	return ""
+}
+
+// readyMessage names the providers a ready membership is ready on.
+func readyMessage(names []string) string {
+	if len(names) == 1 {
+		return names[0] + " contact group membership is ready"
+	}
+	return strings.Join(names, " and ") + " contact group membership are ready"
+}
+
+// verifyContactGroupMembershipReadyCondition sets the membership's overall Ready from the conditions of the
+// providers that serve its contact group.
+func (r *ContactGroupMembershipController) verifyContactGroupMembershipReadyCondition(cgm *notificationmiloapiscomv1alpha1.ContactGroupMembership, cg *notificationmiloapiscomv1alpha1.ContactGroup) {
+	notReadyMsg, names := "", []string{}
+	for _, provider := range requiredProviders(cg) {
+		notReadyMsg += notReadyReason(provider.name, meta.FindStatusCondition(cgm.Status.Conditions, provider.condition))
+		names = append(names, provider.name)
+	}
+
+	ready := metav1.Condition{
+		Type:               notificationmiloapiscomv1alpha1.ContactGroupMembershipReadyCondition,
+		Status:             metav1.ConditionTrue,
+		Reason:             "AllProvidersReady",
+		Message:            readyMessage(names),
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: cgm.GetGeneration(),
+	}
+	if notReadyMsg != "" {
+		ready.Status, ready.Reason, ready.Message = metav1.ConditionFalse, "ProvidersNotReady", notReadyMsg
+	}
+	meta.SetStatusCondition(&cgm.Status.Conditions, ready)
 }
