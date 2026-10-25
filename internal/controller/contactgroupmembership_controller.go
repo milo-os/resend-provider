@@ -365,8 +365,9 @@ func readyMessage(names []string) string {
 // verifyContactGroupMembershipReadyCondition sets the membership's overall Ready from the conditions of the
 // providers that serve its contact group.
 func (r *ContactGroupMembershipController) verifyContactGroupMembershipReadyCondition(cgm *notificationmiloapiscomv1alpha1.ContactGroupMembership, cg *notificationmiloapiscomv1alpha1.ContactGroup) {
-	notReadyMsg, names := "", []string{}
-	for _, provider := range requiredProviders(cg) {
+	providers := requiredProviders(cg)
+	notReadyMsg, names := "", make([]string, 0, len(providers))
+	for _, provider := range providers {
 		notReadyMsg += notReadyReason(provider.name, meta.FindStatusCondition(cgm.Status.Conditions, provider.condition))
 		names = append(names, provider.name)
 	}
