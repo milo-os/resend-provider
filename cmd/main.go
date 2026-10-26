@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
 	iammiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
 	notificationmiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/notification/v1alpha1"
@@ -11,6 +12,9 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	"go.miloapis.com/email-provider-resend/internal/logredact"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -46,4 +50,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// newLogger builds a zap logger that keeps email addresses out of its output.
+// Both commands log through it: errors from Resend and the API server can
+// quote a recipient's address back.
+func newLogger(opts ...zap.Opts) logr.Logger {
+	return logredact.Wrap(zap.New(opts...))
 }

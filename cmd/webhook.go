@@ -73,7 +73,7 @@ func runWebhook(
 	metricsBindAddress string,
 	webhookSigningKey, contactWebhookSigningKey string,
 	emailFrom string) error {
-	logf.SetLogger(zap.New(zap.JSONEncoder()))
+	logf.SetLogger(newLogger(zap.JSONEncoder()))
 	log := logf.Log.WithName("resend-webhook")
 
 	// Validate command flags early so we fail fast with meaningful errors.

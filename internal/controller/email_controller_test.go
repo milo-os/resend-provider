@@ -19,8 +19,10 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	ginko "github.com/onsi/ginkgo/v2"
 	gomega "github.com/onsi/gomega"
 	iammiloapiscomv1alpha1 "go.miloapis.com/milo/pkg/apis/iam/v1alpha1"
@@ -32,6 +34,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"go.miloapis.com/email-provider-resend/internal/config"
 	"go.miloapis.com/email-provider-resend/internal/emailprovider"
@@ -320,6 +323,28 @@ var _ = ginko.Describe("EmailController.Reconcile", func() {
 			gomega.Expect(fetched.Status.HTMLBody).To(gomega.Equal(""))
 			gomega.Expect(fetched.Status.TextBody).To(gomega.Equal(""))
 			gomega.Expect(fetched.Status.EmailAddress).To(gomega.Equal("recipient@example.com"))
+		})
+
+		// The reconciler's own log lines must name the recipient without its
+		// address. The logger here doesn't redact, so this catches a field
+		// that logs the address directly.
+		ginko.It("does not log the recipient address", func() {
+			var out strings.Builder
+			logCtx := logf.IntoContext(ctx, funcr.New(func(prefix, args string) {
+				out.WriteString(prefix + " " + args + "\n")
+			}, funcr.Options{Verbosity: 10}))
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Name: emailObj.Name, Namespace: emailObj.Namespace}}
+
+			// A failed send, then a successful one, covers both paths.
+			fakeProv.SendEmailErr = fmt.Errorf("resend is unavailable")
+			_, err := controller.Reconcile(logCtx, req)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			fakeProv.SendEmailErr = nil
+			_, err = controller.Reconcile(logCtx, req)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			gomega.Expect(out.String()).To(gomega.ContainSubstring("Reconciling Email"))
+			gomega.Expect(out.String()).NotTo(gomega.ContainSubstring("recipient@example.com"))
 		})
 	})
 })
