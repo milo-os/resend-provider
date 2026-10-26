@@ -80,17 +80,27 @@ func (f *contactFinalizer) Finalize(ctx context.Context, obj client.Object) (fin
 		return finalizer.Result{}, fmt.Errorf("object is not a Contact")
 	}
 
-	// Delete Contact on email provider
-	deleted, err := f.EmailProvider.DeleteContact(ctx, *contact)
-	if err != nil && !errors.IsNotFound(err) {
-		log.Error(err, "Failed to delete Contact on email provider")
-		return finalizer.Result{}, fmt.Errorf("failed to delete Contact on email provider: %w", err)
+	// Delete Contact on email provider, unless another Contact still uses the
+	// same Resend contact (see resendContactInUseByOthers).
+	inUse, err := resendContactInUseByOthers(ctx, f.Client, contact)
+	if err != nil {
+		log.Error(err, "Failed to check whether the email provider contact is shared")
+		return finalizer.Result{}, err
 	}
-	// The delete call is idempotent: a nil error with Deleted=false means the
-	// contact was already absent on the provider, which is the desired final
-	// state, so the finalizer can complete.
-	if err == nil && !deleted.Deleted {
-		log.Info("Contact already deleted on email provider. Contact finalizer completed.")
+	if inUse {
+		log.Info("Another Contact uses the same email provider contact; leaving it in place", "providerID", contact.Status.ProviderID)
+	} else {
+		deleted, err := f.EmailProvider.DeleteContact(ctx, *contact)
+		if err != nil && !errors.IsNotFound(err) {
+			log.Error(err, "Failed to delete Contact on email provider")
+			return finalizer.Result{}, fmt.Errorf("failed to delete Contact on email provider: %w", err)
+		}
+		// The delete call is idempotent: a nil error with Deleted=false means the
+		// contact was already absent on the provider, which is the desired final
+		// state, so the finalizer can complete.
+		if err == nil && !deleted.Deleted {
+			log.Info("Contact already deleted on email provider. Contact finalizer completed.")
+		}
 	}
 
 	// Get associated ContactGroupMemberships to contact name
@@ -234,8 +244,14 @@ func (r *ContactController) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	case updatedCond != nil && updatedCond.ObservedGeneration != contact.GetGeneration():
 		log.Info("Contact updated")
 
-		// Update Contact on email provider
-		emailProviderContact, err := r.EmailProvider.UpdateContactIdempotent(ctx, *contact)
+		// Update Contact on email provider. The old Resend contact is kept if
+		// another Contact still uses it (see resendContactInUseByOthers).
+		oldInUse, err := resendContactInUseByOthers(ctx, r.Client, contact)
+		if err != nil {
+			log.Error(err, "Failed to check whether the email provider contact is shared")
+			return ctrl.Result{}, err
+		}
+		emailProviderContact, err := r.EmailProvider.UpdateContactIdempotent(ctx, *contact, !oldInUse)
 		if err != nil {
 			log.Error(err, "Failed to update Contact on email provider")
 			return ctrl.Result{}, fmt.Errorf("failed to update Contact on email provider: %w", err)

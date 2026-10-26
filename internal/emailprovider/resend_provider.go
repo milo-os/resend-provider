@@ -9,6 +9,7 @@ import (
 
 	"github.com/resend/resend-go/v3"
 	rtime "go.miloapis.com/email-provider-resend/internal/resend"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -24,6 +25,13 @@ const contactGroupsPageSize = 100
 // NewResendEmailProvider instantiates the provider from the given API key.
 func NewResendEmailProvider(apiKey string) *ResendEmailProvider {
 	return newResendEmailProvider(apiKey, nil)
+}
+
+// NewResendEmailProviderWithBaseURL is NewResendEmailProvider talking to the
+// Resend API at baseURL, such as a test server. It keeps the transport that
+// reports Resend 404s as NotFound.
+func NewResendEmailProviderWithBaseURL(apiKey string, baseURL *url.URL) *ResendEmailProvider {
+	return newResendEmailProvider(apiKey, baseURL)
 }
 
 // newResendEmailProvider is NewResendEmailProvider with the API base URL
@@ -51,7 +59,11 @@ func (r *ResendEmailProvider) SendEmail(ctx context.Context, input SendEmailInpu
 		tags = append(tags, resend.Tag{Name: tag.Name, Value: tag.Value})
 	}
 
-	resp, err := r.client.Emails.Send(&resend.SendEmailRequest{
+	// The idempotency key goes in Resend's Idempotency-Key request header, so a
+	// retry within Resend's 24-hour window returns the original email instead
+	// of sending it again. SendEmailRequest.Headers would add it to the
+	// delivered message instead.
+	resp, err := r.client.Emails.SendWithOptions(ctx, &resend.SendEmailRequest{
 		From:    input.From,
 		ReplyTo: input.ReplyTo,
 		To:      input.To,
@@ -61,10 +73,7 @@ func (r *ResendEmailProvider) SendEmail(ctx context.Context, input SendEmailInpu
 		Html:    input.HtmlBody,
 		Text:    input.TextBody,
 		Tags:    tags,
-		Headers: map[string]string{
-			"IdempotencyKey": input.IdempotencyKey,
-		},
-	})
+	}, &resend.SendEmailOptions{IdempotencyKey: input.IdempotencyKey})
 	if err != nil {
 		return output, fmt.Errorf("failed to send email using resend: %w", err)
 	}
@@ -157,13 +166,25 @@ func (r *ResendEmailProvider) ListContactGroups(ctx context.Context) (ListContac
 	}
 }
 
-// CreateContactGroupMembership satisfies the EmailProvider interface. It returns the resend contact group membership id of the contact group membership.
+// CreateContactGroupMembership satisfies the EmailProvider interface. It adds
+// the contact to the segment unless it is already a member, so a retry after a
+// failed status write doesn't add it twice. It returns the segment's ID, which
+// is what Resend returns when adding a contact.
 func (r *ResendEmailProvider) CreateContactGroupMembership(ctx context.Context, input CreateContactGroupMembershipInput) (CreateContactGroupMembershipOutput, error) {
 	output := CreateContactGroupMembershipOutput{
 		ContactGroupMembershipID: "",
 	}
 
-	resp, err := r.client.Contacts.Segments.Add(&resend.AddContactSegmentRequest{
+	member, err := r.isSegmentMember(ctx, input.ContactId, input.ContactGroupId)
+	if err != nil {
+		return output, TranslateResendError(err, schema.GroupResource{Group: "resend", Resource: "contacts"}, input.ContactId)
+	}
+	if member {
+		output.ContactGroupMembershipID = input.ContactGroupId
+		return output, nil
+	}
+
+	resp, err := r.client.Contacts.Segments.AddWithContext(ctx, &resend.AddContactSegmentRequest{
 		ContactId: input.ContactId,
 		SegmentId: input.ContactGroupId,
 	})
@@ -174,6 +195,29 @@ func (r *ResendEmailProvider) CreateContactGroupMembership(ctx context.Context, 
 	output.ContactGroupMembershipID = resp.Id
 
 	return output, nil
+}
+
+// isSegmentMember reports whether the contact is already in the segment.
+func (r *ResendEmailProvider) isSegmentMember(ctx context.Context, contactID, segmentID string) (bool, error) {
+	limit := contactGroupsPageSize
+	options := &resend.ListOptions{Limit: &limit}
+	for {
+		resp, err := r.client.Contacts.Segments.ListWithOptions(ctx,
+			&resend.ListContactSegmentsRequest{ContactId: contactID}, options)
+		if err != nil {
+			return false, err
+		}
+		for _, segment := range resp.Data {
+			if segment.Id == segmentID {
+				return true, nil
+			}
+		}
+		if !resp.HasMore || len(resp.Data) == 0 {
+			return false, nil
+		}
+		after := resp.Data[len(resp.Data)-1].Id
+		options = &resend.ListOptions{Limit: &limit, After: &after}
+	}
 }
 
 // DeleteContactGroupMembership satisfies the EmailProvider interface. It returns the resend contact group membership id of the contact group membership.
@@ -196,11 +240,26 @@ func (r *ResendEmailProvider) DeleteContactGroupMembership(ctx context.Context, 
 	return output, nil
 }
 
-// CreateContact satisfies the EmailProvider interface. It returns the resend contact email of the contact.
+// CreateContact satisfies the EmailProvider interface. It returns the ID of
+// the Resend contact with the input's email address, creating the contact only
+// if Resend answers the lookup with a 404, so a retry after a failed status
+// write doesn't create it twice. Any other lookup failure is returned, since
+// the contact may exist.
 func (r *ResendEmailProvider) CreateContact(ctx context.Context, input CreateContactInput) (CreateContactOutput, error) {
 	output := CreateContactOutput{}
 
-	resp, err := r.client.Contacts.Create(&resend.CreateContactRequest{
+	existing, err := r.client.Contacts.GetWithContext(ctx, &resend.GetContactOptions{
+		Id: url.PathEscape(input.Email),
+	})
+	switch {
+	case err == nil && existing.Id != "":
+		output.ContactId = existing.Id
+		return output, nil
+	case err != nil && !apierrors.IsNotFound(TranslateResendError(err, schema.GroupResource{Group: "resend", Resource: "contacts"}, input.Email)):
+		return output, fmt.Errorf("failed to look up contact using resend: %w", err)
+	}
+
+	resp, err := r.client.Contacts.CreateWithContext(ctx, &resend.CreateContactRequest{
 		Email:        input.Email,
 		FirstName:    input.GivenName,
 		LastName:     input.FamilyName,

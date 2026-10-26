@@ -158,9 +158,11 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	email.Status.Subject = output.Subject
 	email.Status.EmailAddress = output.RecipientEmailAddress
 
-	// EmailProvider.Send (resend implementation) uses an idempotency mechanism using the Email.Name as idempotency key.
-	// In case of a failure updating the status, the email won't be sent again, and the return value from EmailProvider.Send
-	// will be the same one as the original one. The idempotency only lasts for 24 hours.
+	// EmailProvider.Send passes the Email's UID to Resend as the idempotency
+	// key. If this status write fails, the retry sends the same request with the
+	// same key, and Resend returns the original email instead of sending it
+	// again. Resend keeps keys for 24 hours, and rejects a reused key whose
+	// request body changed, for example because the template was edited.
 	if err := r.updateEmailStatus(ctx, base, email, metav1.Condition{
 		Type:               notificationmiloapiscomv1alpha1.EmailDeliveredCondition,
 		Status:             metav1.ConditionUnknown,
