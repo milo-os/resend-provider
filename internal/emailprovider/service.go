@@ -166,9 +166,14 @@ func (s *Service) DeleteContact(ctx context.Context, contact notificationmiloapi
 }
 
 // UpdateContactIdempotent updates a contact on the email provider.
-// It deletes the existing contact and creates a new one, as Resend does not support updating the email address.
+// Resend can't change a contact's email address, so it creates the contact for
+// the new address and, if deleteOld is true, first deletes the old one. The
+// caller passes false when another Contact still uses the old Resend contact.
 // This is an idempotent operation.
-func (s *Service) UpdateContactIdempotent(ctx context.Context, contact notificationmiloapiscomv1alpha1.Contact) (CreateContactOutput, error) {
+func (s *Service) UpdateContactIdempotent(ctx context.Context, contact notificationmiloapiscomv1alpha1.Contact, deleteOld bool) (CreateContactOutput, error) {
+	if !deleteOld {
+		return s.CreateContactIdempotent(ctx, contact)
+	}
 	deleted, err := s.DeleteContact(ctx, contact)
 	if err != nil {
 		if !errors.IsNotFound(err) {

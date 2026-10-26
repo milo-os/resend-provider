@@ -12,7 +12,7 @@
 
 * **Template Rendering**: Dynamic email content using EmailTemplate CRDs with variable substitution
 
-* **Idempotency**: Uses Email UID as idempotency key to prevent duplicate sends
+* **Idempotency**: Sends the Email UID as Resend's `Idempotency-Key`, so a retry within 24 hours doesn't send the email again. Contacts and segment memberships are looked up before they're created.
 
 * **Status Tracking**: Kubernetes conditions for email delivery states (Pending/Delivered/Failed)
 

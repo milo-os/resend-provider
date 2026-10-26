@@ -54,6 +54,7 @@ var _ = ginkgo.Describe("ContactController", func() {
 		}
 
 		k8sClient = fake.NewClientBuilder().
+			WithIndex(&notificationv1.Contact{}, contactProviderIDIndexKey, contactProviderIDIndex).
 			WithScheme(sch).
 			WithStatusSubresource(&notificationv1.Contact{}).
 			WithObjects(contact.DeepCopy()).
@@ -154,6 +155,7 @@ var _ = ginkgo.Describe("contactFinalizer", func() {
 		}
 
 		k8sClient = fake.NewClientBuilder().
+			WithIndex(&notificationv1.Contact{}, contactProviderIDIndexKey, contactProviderIDIndex).
 			WithScheme(sch).
 			WithObjects(contact.DeepCopy(), cgm.DeepCopy()).
 			WithIndex(&notificationv1.ContactGroupMembership{}, contactNamespacedIndexKey, func(raw client.Object) []string {
@@ -190,6 +192,7 @@ var _ = ginkgo.Describe("contactFinalizer", func() {
 
 		sch := scheme.Scheme
 		k8sClient = fake.NewClientBuilder().
+			WithIndex(&notificationv1.Contact{}, contactProviderIDIndexKey, contactProviderIDIndex).
 			WithScheme(sch).
 			WithObjects(contact.DeepCopy(), other).
 			WithIndex(&notificationv1.ContactGroupMembership{}, contactNamespacedIndexKey, func(raw client.Object) []string {
