@@ -84,7 +84,9 @@ func (r *EmailController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, nil
 	}
 
-	log.Info("Reconciling Email", "email", email.Name, "template", email.Spec.TemplateRef.Name, "recipient", email.Spec.Recipient)
+	// Name the recipient by its User, never by address: a direct recipient
+	// address would otherwise be written to the logs.
+	log.Info("Reconciling Email", "email", email.Name, "template", email.Spec.TemplateRef.Name, "userRef", email.Spec.Recipient.UserRef.Name)
 
 	// Terminal failure: the recipient User no longer exists, the email can
 	// never be delivered, and retrying would loop forever. Skip all work.

@@ -137,7 +137,7 @@ func createManagerCommand() *cobra.Command {
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	ctrl.SetLogger(newLogger(zap.UseFlagOptions(&opts)))
 
 	setupLog.Info("starting email-provider-resend",
 		"version", version,
