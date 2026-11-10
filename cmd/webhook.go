@@ -12,6 +12,7 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -28,6 +29,7 @@ func createWebhookCommand() *cobra.Command {
 	var webhookPort int
 	var certDir, certFile, keyFile string
 	var metricsBindAddress string
+	var probeAddr string
 	var webhookSigningKey, contactWebhookSigningKey string
 	var emailFrom string
 
@@ -39,7 +41,7 @@ func createWebhookCommand() *cobra.Command {
 				cmd,
 				webhookPort,
 				certDir, certFile, keyFile,
-				metricsBindAddress,
+				metricsBindAddress, probeAddr,
 				webhookSigningKey, contactWebhookSigningKey,
 				emailFrom)
 		},
@@ -59,6 +61,7 @@ func createWebhookCommand() *cobra.Command {
 
 	// Metrics flags.
 	cmd.Flags().StringVar(&metricsBindAddress, "metrics-bind-address", ":8080", "address the metrics endpoint binds to")
+	cmd.Flags().StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 
 	webhookSigningKey = os.Getenv("RESEND_WEBHOOK_SIGNING_KEY")
 	contactWebhookSigningKey = os.Getenv("RESEND_CONTACT_WEBHOOK_SIGNING_KEY")
@@ -70,7 +73,7 @@ func runWebhook(
 	cmd *cobra.Command,
 	webhookPort int,
 	certDir, certFile, keyFile string,
-	metricsBindAddress string,
+	metricsBindAddress, probeAddr string,
 	webhookSigningKey, contactWebhookSigningKey string,
 	emailFrom string) error {
 	logf.SetLogger(newLogger(zap.JSONEncoder()))
@@ -111,7 +114,8 @@ func runWebhook(
 
 	log.Info("Creating manager")
 	mgr, err := manager.New(restConfig, manager.Options{
-		Scheme: runtimeScheme,
+		Scheme:                 runtimeScheme,
+		HealthProbeBindAddress: probeAddr,
 		Metrics: server.Options{
 			BindAddress: metricsBindAddress,
 		},
@@ -131,6 +135,10 @@ func runWebhook(
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create manager: %w", err)
+	}
+
+	if err := addProbes(mgr); err != nil {
+		return err
 	}
 
 	log.Info("Setting up webhook server")
@@ -168,4 +176,14 @@ func runWebhook(
 
 	log.Info("Starting manager")
 	return mgr.Start(cmd.Context())
+}
+
+func addProbes(mgr manager.Manager) error {
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return fmt.Errorf("failed to set up health check: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+		return fmt.Errorf("failed to set up ready check: %w", err)
+	}
+	return nil
 }

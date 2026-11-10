@@ -36,6 +36,7 @@ spec:
             - --key-file=$(KEY_FILE)
             - --metrics-bind-address=$(METRICS_BIND_ADDRESS)
             - --email-from-address=$(EMAIL_FROM_ADDRESS)
+            - --health-probe-bind-address=$(HEALTH_PROBE_BIND_ADDRESS)
           env:
             - name: WEBHOOK_PORT
               value: "8090"
@@ -47,6 +48,8 @@ spec:
               value: tls.key
             - name: METRICS_BIND_ADDRESS
               value: ":8443"
+            - name: HEALTH_PROBE_BIND_ADDRESS
+              value: ":8081"
             # Set to the manager's EMAIL_FROM_ADDRESS to skip searching for
             # untagged delivery events from other senders. Empty searches for
             # every untagged event.
@@ -62,6 +65,21 @@ spec:
             - containerPort: 8090
               name: webhook
               protocol: TCP
+            - containerPort: 8081
+              name: health
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
